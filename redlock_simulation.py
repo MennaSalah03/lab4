@@ -2,10 +2,9 @@ import redis
 import time
 import uuid
 import multiprocessing
-
 import redis.exceptions
 
-client_processes_waiting = [0, 1, 1, 1, 4]
+client_processes_waiting = [0, 1, 1, 4, 6]
 
 class Redlock:
     def __init__(self, redis_nodes):
@@ -16,8 +15,12 @@ class Redlock:
         self.redis_nodes = redis_nodes
         self.redis_connects = []
         for i in self.redis_nodes:
-            connect = redis.Redis(i[0], i[1])
-            self.redis_connects.append(connect)
+            try:
+                connect = redis.Redis(i[0], i[1])
+                connect.ping # tests connection
+                self.redis_connects.append(connect)
+            except Exception as e:
+                print(f" connection to redis-node-{i} failed")
         
     def acquire_lock(self, resource, ttl):
         """
@@ -27,16 +30,19 @@ class Redlock:
         :return: Tuple (lock_acquired, lock_id).
         """
         lock_id = str(uuid.uuid1())
-        success_count = 0
+        success_count = 0 #min. = (size/2) + 1 = 3 here
+        starting_time = time.time() * 1000 #ms
 
         for node in self.redis_connects:
             try:
                 if (node.set(resource, lock_id, nx = True, px = ttl)):
                     success_count += 1
-            except redis.exceptions.LockError:
-                print(f"{node} didn't acquired lock.")
+            except redis.exceptions.RedisError as e:
+                print(f"didn't acquired lock: {e}")
         
-        if (success_count <= 2):
+        elapsed_time = time.time() * 1000 - starting_time
+        available_time = ttl - elapsed_time
+        if (success_count < 3 or available_time <= 0):
             self.release_lock(resource, lock_id)
             return False, None
         
@@ -52,8 +58,8 @@ class Redlock:
             try:
                 if (node.get(resource) == lock_id):
                     node.delete(resource)
-            except redis.exceptions.ConnectionError:
-                print(f"{node} didn't acquired lock.")
+            except Exception as e:
+                print(f"failed to release the lock{e}")
 
 def client_process(redis_nodes, resource, ttl, client_id):
     """
